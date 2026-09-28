@@ -4,28 +4,49 @@ ai_service.py
 Handles all interactions with the Groq LLM API.
 
 The AI service takes the current incident details plus the historical memories
-retrieved from Hindsight and produces a structured incident analysis:
-  - Incident Summary
-  - Possible Root Cause
-  - Evidence From Previous Incidents  (based ONLY on Hindsight memories)
-  - Investigation Steps
-  - Recommended Resolution
-  - Confidence level
+retrieved from Hindsight and produces a structured incident analysis.
 
-The LLM is explicitly instructed NOT to invent historical incidents —
-it may only reference memories that were actually returned by Hindsight.
+Secret resolution order:
+  1. st.secrets  (Streamlit Community Cloud)
+  2. os.environ  (local .env via python-dotenv)
 """
 
 import os
 from dotenv import load_dotenv
 from groq import Groq
 
-load_dotenv()
+load_dotenv()  # no-op on Streamlit Cloud, works locally
 
-# ── Configuration ─────────────────────────────────────────────────────────────
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+def _secret(key: str, default: str = "") -> str:
+    """
+    Read a secret from st.secrets (Streamlit Cloud) first,
+    then fall back to environment variables (local .env).
+    """
+    try:
+        import streamlit as st
+        val = st.secrets.get(key, None)
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+# ── Configuration (lazy so st.secrets is initialised first) ──────────────────
+
+def _api_key() -> str: return _secret("GROQ_API_KEY")
+def _model()   -> str: return _secret("GROQ_MODEL", "openai/gpt-oss-120b")
+
+
+# Expose GROQ_MODEL as a module-level attribute for the UI spinner label.
+# It reads lazily from secrets so it works on both local and Cloud.
+class _ModelProxy:
+    def __str__(self): return _model()
+    def __repr__(self): return _model()
+
+GROQ_MODEL = _ModelProxy()
+
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -75,16 +96,18 @@ Rate your confidence in this analysis: Low / Medium / High
 Explain briefly why (e.g., strong historical match, limited data, novel error).
 """
 
+
 # ── Groq client factory ────────────────────────────────────────────────────────
 
 def get_groq_client() -> Groq:
     """Return a configured Groq client. Raises ValueError if key is missing."""
-    if not GROQ_API_KEY:
+    key = _api_key()
+    if not key:
         raise ValueError(
             "GROQ_API_KEY is not set. "
-            "Copy .env.example to .env and add your Groq API key."
+            "Add it to Streamlit Cloud secrets or your local .env file."
         )
-    return Groq(api_key=GROQ_API_KEY)
+    return Groq(api_key=key)
 
 
 # ── Main analysis function ─────────────────────────────────────────────────────
@@ -100,32 +123,17 @@ def analyze_incident(
     """
     Send the current incident + Hindsight memories to Groq for analysis.
 
-    Parameters
-    ----------
-    service             : Name of the affected service.
-    error               : Error message / log snippet.
-    severity            : Low | Medium | High | Critical.
-    environment         : Development | Testing | Production.
-    recent_changes      : What changed recently before the incident.
-    historical_memories : List of memory dicts from hindsight_service.recall_similar_incidents()
-                          Each has 'text' and 'type'.
-
-    Returns
-    -------
-    dict with keys:
-        success  (bool)
-        analysis (str)   – full markdown analysis text
-        message  (str)   – error message on failure
+    Returns: dict(success, analysis, message)
     """
     try:
         client = get_groq_client()
+        model  = _model()
 
-        # ── Build the user prompt ─────────────────────────────────────────────
-        # Format historical memories clearly so the LLM can reference them.
-        if historical_memories:
-            memories_section = _format_memories_for_prompt(historical_memories)
-        else:
-            memories_section = "No historical incidents found in Hindsight memory."
+        memories_section = (
+            _format_memories_for_prompt(historical_memories)
+            if historical_memories
+            else "No historical incidents found in Hindsight memory."
+        )
 
         user_prompt = f"""
 CURRENT INCIDENT
@@ -144,85 +152,41 @@ Please analyze this incident and provide your structured assessment following th
 format defined in your instructions.
 """.strip()
 
-        # ── Call Groq ──────────────────────────────────────────────────────────
         response = client.chat.completions.create(
-            model=GROQ_MODEL,
+            model=model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user",   "content": user_prompt},
             ],
-            temperature=0.3,   # lower = more focused, less hallucination
+            temperature=0.3,
             max_tokens=2048,
         )
 
         analysis_text = response.choices[0].message.content.strip()
-
-        return {
-            "success": True,
-            "analysis": analysis_text,
-            "message": "Analysis complete.",
-        }
+        return {"success": True, "analysis": analysis_text, "message": "Analysis complete."}
 
     except ValueError as ve:
-        return {
-            "success": False,
-            "analysis": "",
-            "message": str(ve),
-        }
+        return {"success": False, "analysis": "", "message": str(ve)}
     except Exception as e:
-        return {
-            "success": False,
-            "analysis": "",
-            "message": f"Failed to get analysis from Groq: {e}",
-        }
-
-
-# ── Helper: format memories for the LLM prompt ────────────────────────────────
-
-def _format_memories_for_prompt(memories: list) -> str:
-    """
-    Convert Hindsight memory dicts into a clearly numbered text block
-    for injection into the LLM user prompt.
-    """
-    lines = []
-    for i, mem in enumerate(memories, 1):
-        text = mem.get("text", "").strip()
-        mem_type = mem.get("type", "observation")
-        lines.append(f"Historical Memory #{i} [{mem_type}]:")
-        lines.append(text)
-        lines.append("")   # blank line separator
-    return "\n".join(lines).strip()
+        return {"success": False, "analysis": "", "message": f"Failed to get analysis from Groq: {e}"}
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
 def check_groq_connection() -> dict:
-    """
-    Quick connectivity check: sends a minimal request to Groq.
-    Returns a dict with keys: success (bool), message (str).
-    """
-    if not GROQ_API_KEY:
-        return {
-            "success": False,
-            "message": "GROQ_API_KEY not configured.",
-        }
+    """Quick connectivity check. Returns dict(success, message)."""
+    if not _api_key():
+        return {"success": False, "message": "GROQ_API_KEY not configured."}
     try:
         client = get_groq_client()
-        # Minimal test request
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
+        client.chat.completions.create(
+            model=_model(),
             messages=[{"role": "user", "content": "ping"}],
             max_tokens=5,
         )
-        return {
-            "success": True,
-            "message": f"Groq connected. Model: {GROQ_MODEL}",
-        }
+        return {"success": True, "message": f"Groq connected. Model: {_model()}"}
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Groq connection failed: {e}",
-        }
+        return {"success": False, "message": f"Groq connection failed: {e}"}
 
 
 # ── Parse analysis sections ────────────────────────────────────────────────────
@@ -231,10 +195,6 @@ def parse_analysis_sections(analysis_text: str) -> dict:
     """
     Parse the LLM markdown response into individual sections for structured
     display in the Streamlit UI.
-
-    Returns a dict with keys matching the section headers:
-        summary, root_cause, evidence, investigation_steps,
-        recommended_resolution, confidence
     """
     sections = {
         "summary": "",
@@ -245,7 +205,6 @@ def parse_analysis_sections(analysis_text: str) -> dict:
         "confidence": "",
     }
 
-    # Map markdown headers to dict keys
     header_map = {
         "## Incident Summary":                "summary",
         "## Possible Root Cause":             "root_cause",
@@ -255,29 +214,38 @@ def parse_analysis_sections(analysis_text: str) -> dict:
         "## Confidence":                      "confidence",
     }
 
-    current_key = None
+    current_key   = None
     current_lines = []
 
     for line in analysis_text.splitlines():
-        # Check if this line is a known section header
-        matched_header = None
+        matched = None
         for header, key in header_map.items():
             if line.strip().startswith(header):
-                matched_header = key
+                matched = key
                 break
-
-        if matched_header:
-            # Save previous section
+        if matched:
             if current_key:
                 sections[current_key] = "\n".join(current_lines).strip()
-            current_key = matched_header
+            current_key   = matched
             current_lines = []
         else:
             if current_key:
                 current_lines.append(line)
 
-    # Save the last section
     if current_key:
         sections[current_key] = "\n".join(current_lines).strip()
 
     return sections
+
+
+# ── Internal helper ───────────────────────────────────────────────────────────
+
+def _format_memories_for_prompt(memories: list) -> str:
+    lines = []
+    for i, mem in enumerate(memories, 1):
+        text     = mem.get("text", "").strip()
+        mem_type = mem.get("type", "observation")
+        lines.append(f"Historical Memory #{i} [{mem_type}]:")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines).strip()

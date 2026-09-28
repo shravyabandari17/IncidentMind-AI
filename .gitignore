@@ -72,7 +72,7 @@ ipython_config.py
 # pyenv
 .python-version
 
-# Streamlit
+# Streamlit — secrets must never be committed
 .streamlit/secrets.toml
 
 # macOS

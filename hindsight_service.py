@@ -9,36 +9,59 @@ Hindsight gives IncidentMind AI its long-term memory:
 
 SDK: hindsight-client
 Docs: https://docs.hindsight.vectorize.io/python-sdk/
+
+Secret resolution order:
+  1. st.secrets  (Streamlit Community Cloud)
+  2. os.environ  (local .env via python-dotenv)
 """
 
 import os
-from typing import Optional
 from dotenv import load_dotenv
 from hindsight_client import Hindsight
 
-load_dotenv()
+load_dotenv()  # no-op on Streamlit Cloud, works locally
 
-# ── Configuration ────────────────────────────────────────────────────────────
 
-HINDSIGHT_API_KEY  = os.getenv("HINDSIGHT_API_KEY", "")
-HINDSIGHT_BASE_URL = os.getenv("HINDSIGHT_BASE_URL", "https://api.hindsight.vectorize.io")
-HINDSIGHT_BANK_ID  = os.getenv("HINDSIGHT_BANK_ID", "incidentmind-ai")
+def _secret(key: str, default: str = "") -> str:
+    """
+    Read a secret from st.secrets (Streamlit Cloud) first,
+    then fall back to environment variables (local .env).
+    """
+    try:
+        import streamlit as st
+        val = st.secrets.get(key, None)
+        if val:
+            return str(val)
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+# Values are resolved lazily inside functions so st.secrets is available
+# by the time Streamlit has fully initialised.
+
+def _api_key()  -> str: return _secret("HINDSIGHT_API_KEY")
+def _base_url() -> str: return _secret("HINDSIGHT_BASE_URL", "https://api.hindsight.vectorize.io")
+def _bank_id()  -> str: return _secret("HINDSIGHT_BANK_ID", "incidentmind-ai")
+
 
 # ── Client factory ────────────────────────────────────────────────────────────
 
 def get_hindsight_client() -> Hindsight:
     """
-    Create and return a Hindsight client instance.
-    Raises ValueError if the API key is not configured.
+    Create and return a configured Hindsight client.
+    Raises ValueError if the API key is not set.
     """
-    if not HINDSIGHT_API_KEY:
+    key = _api_key()
+    if not key:
         raise ValueError(
             "HINDSIGHT_API_KEY is not set. "
-            "Copy .env.example to .env and add your Hindsight API key."
+            "Add it to Streamlit Cloud secrets or your local .env file."
         )
     return Hindsight(
-        base_url=HINDSIGHT_BASE_URL,
-        api_key=HINDSIGHT_API_KEY,
+        base_url=_base_url(),
+        api_key=key,
         timeout=60.0,
     )
 
@@ -48,16 +71,16 @@ def get_hindsight_client() -> Hindsight:
 def ensure_bank_exists() -> dict:
     """
     Make sure the IncidentMind memory bank exists in Hindsight.
-    Creates it on first run; subsequent calls are safe (bank already exists).
+    Creates it on first run; safe to call repeatedly.
 
-    Returns a dict with keys:
-        success (bool), message (str), bank_id (str)
+    Returns: dict(success, message, bank_id)
     """
     try:
         client = get_hindsight_client()
+        bank_id = _bank_id()
         try:
             bank = client.create_bank(
-                bank_id=HINDSIGHT_BANK_ID,
+                bank_id=bank_id,
                 name="IncidentMind AI – Incident Memory",
                 background=(
                     "This memory bank stores production incident postmortems for "
@@ -67,32 +90,17 @@ def ensure_bank_exists() -> dict:
                 ),
             )
             client.close()
-            return {
-                "success": True,
-                "message": f"Memory bank '{HINDSIGHT_BANK_ID}' created.",
-                "bank_id": bank.bank_id,
-            }
+            return {"success": True, "message": f"Memory bank '{bank_id}' created.", "bank_id": bank.bank_id}
         except Exception as inner:
-            # Hindsight returns an error when the bank already exists —
-            # that is expected and safe to ignore.
             client.close()
-            err_str = str(inner).lower()
-            if "already exists" in err_str or "conflict" in err_str or "400" in err_str or "409" in err_str:
-                return {
-                    "success": True,
-                    "message": f"Memory bank '{HINDSIGHT_BANK_ID}' already exists.",
-                    "bank_id": HINDSIGHT_BANK_ID,
-                }
+            err = str(inner).lower()
+            if any(x in err for x in ("already exists", "conflict", "400", "409")):
+                return {"success": True, "message": f"Memory bank '{bank_id}' ready.", "bank_id": bank_id}
             raise
-
     except ValueError as ve:
         return {"success": False, "message": str(ve), "bank_id": ""}
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Could not connect to Hindsight: {e}",
-            "bank_id": "",
-        }
+        return {"success": False, "message": f"Could not connect to Hindsight: {e}", "bank_id": ""}
 
 
 # ── RETAIN – Store a postmortem ───────────────────────────────────────────────
@@ -110,15 +118,8 @@ def retain_postmortem(
     """
     RETAIN: Store a resolved incident postmortem in Hindsight memory.
 
-    Hindsight will extract structured facts from the postmortem text and index
-    them for future semantic recall.  The next time a similar incident occurs,
-    recall() will surface this postmortem as a relevant historical memory.
-
-    Returns a dict with keys:
-        success (bool), message (str)
+    Returns: dict(success, message)
     """
-    # Build a rich, structured postmortem document so Hindsight can extract
-    # meaningful facts from it.
     postmortem_text = f"""
 INCIDENT POSTMORTEM — IncidentMind AI
 
@@ -149,7 +150,7 @@ Total time to resolution was {resolution_time}.
     try:
         client = get_hindsight_client()
         client.retain(
-            bank_id=HINDSIGHT_BANK_ID,
+            bank_id=_bank_id(),
             content=postmortem_text,
             context=(
                 f"Production incident postmortem: {service} | {severity} | "
@@ -168,18 +169,14 @@ Total time to resolution was {resolution_time}.
         return {
             "success": True,
             "message": (
-                f"Postmortem for '{service}' successfully stored in Hindsight. "
+                f"Postmortem for '{service}' stored in Hindsight. "
                 "Future incidents can now recall this experience."
             ),
         }
-
     except ValueError as ve:
         return {"success": False, "message": str(ve)}
     except Exception as e:
-        return {
-            "success": False,
-            "message": f"Failed to store postmortem in Hindsight: {e}",
-        }
+        return {"success": False, "message": f"Failed to store postmortem in Hindsight: {e}"}
 
 
 # ── RECALL – Retrieve relevant historical incidents ───────────────────────────
@@ -194,18 +191,8 @@ def recall_similar_incidents(
     """
     RECALL: Search Hindsight for historical incidents similar to the current one.
 
-    Builds a rich semantic query from the incident details and retrieves the
-    most relevant postmortems from the memory bank.
-
-    Returns a dict with keys:
-        success     (bool)
-        memories    (list[dict])  – each has 'text' and 'type'
-        count       (int)
-        message     (str)
+    Returns: dict(success, memories, count, message)
     """
-    # Build a descriptive search query so Hindsight can find semantically
-    # similar historical incidents across service names, error types, and
-    # root causes.
     query = (
         f"Service: {service}. "
         f"Error: {error}. "
@@ -222,81 +209,52 @@ def recall_similar_incidents(
     try:
         client = get_hindsight_client()
         result = client.recall(
-            bank_id=HINDSIGHT_BANK_ID,
+            bank_id=_bank_id(),
             query=query,
-            budget="mid",      # balance speed vs. thoroughness
+            budget="mid",
             max_tokens=4096,
         )
         client.close()
 
-        memories = []
-        for mem in result.results:
-            memories.append({
-                "text": mem.text,
-                "type": getattr(mem, "type", "observation"),
-            })
-
+        memories = [
+            {"text": mem.text, "type": getattr(mem, "type", "observation")}
+            for mem in result.results
+        ]
         count = len(memories)
-        if count == 0:
-            message = (
+        message = (
+            f"{count} relevant historical memory{'s' if count != 1 else ''} retrieved from Hindsight."
+            if count > 0
+            else (
                 "No relevant historical incidents were found. "
                 "This may be the first occurrence of this type of incident."
             )
-        else:
-            message = f"{count} relevant historical memory{'s' if count != 1 else ''} retrieved from Hindsight."
-
-        return {
-            "success": True,
-            "memories": memories,
-            "count": count,
-            "message": message,
-        }
+        )
+        return {"success": True, "memories": memories, "count": count, "message": message}
 
     except ValueError as ve:
-        return {
-            "success": False,
-            "memories": [],
-            "count": 0,
-            "message": str(ve),
-        }
+        return {"success": False, "memories": [], "count": 0, "message": str(ve)}
     except Exception as e:
-        return {
-            "success": False,
-            "memories": [],
-            "count": 0,
-            "message": f"Failed to recall memories from Hindsight: {e}",
-        }
+        return {"success": False, "memories": [], "count": 0, "message": f"Failed to recall from Hindsight: {e}"}
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
 
 def check_hindsight_connection() -> dict:
-    """
-    Quick connectivity check: attempts to create/verify the memory bank.
-    Returns a dict with keys: success (bool), message (str).
-    """
-    if not HINDSIGHT_API_KEY:
-        return {
-            "success": False,
-            "message": "HINDSIGHT_API_KEY not configured.",
-        }
+    """Quick connectivity check. Returns dict(success, message)."""
+    if not _api_key():
+        return {"success": False, "message": "HINDSIGHT_API_KEY not configured."}
     return ensure_bank_exists()
 
 
-# ── Format memories for display / LLM prompt ─────────────────────────────────
+# ── Format memories for LLM prompt ───────────────────────────────────────────
 
 def format_memories_for_prompt(memories: list) -> str:
-    """
-    Convert the list of Hindsight memory dicts into a clean text block
-    suitable for injecting into an LLM prompt.
-    """
+    """Convert Hindsight memory dicts into a clean text block for an LLM prompt."""
     if not memories:
         return "No historical incidents found in Hindsight memory."
-
     lines = []
     for i, mem in enumerate(memories, 1):
         lines.append(f"[Memory {i}]")
         lines.append(mem.get("text", "").strip())
-        lines.append("")   # blank line between memories
-
+        lines.append("")
     return "\n".join(lines).strip()
