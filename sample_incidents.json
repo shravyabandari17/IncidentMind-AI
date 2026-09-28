@@ -1,0 +1,94 @@
+{
+  "_note": "These are SYNTHETIC demo incidents for IncidentMind AI. They are NOT real production incidents.",
+  "_purpose": "Use these to populate Hindsight memory via the 'Load Sample Data' button in the app, then test recall with similar incidents.",
+  "incidents": [
+    {
+      "id": "INC-001",
+      "service": "Payment API",
+      "error": "FATAL: remaining connection slots are reserved for non-replication superuser connections\norg.postgresql.util.PSQLException: FATAL: sorry, too many clients already\nDatabase connection timeout after 30000ms\nConnection pool exhausted: active=100, idle=0, pending=47",
+      "severity": "Critical",
+      "environment": "Production",
+      "recent_changes": "Deployed v2.4.1 which added a new bulk payment processing endpoint. No database configuration changes were made.",
+      "root_cause": "Connection pool exhaustion. The new bulk payment endpoint opened multiple concurrent DB connections per request without releasing them promptly, exhausting the pool of 50 connections under high load.",
+      "resolution": "Increased database connection pool size from 50 to 100 in application config. Added connection timeout of 5s and max-lifetime of 30min. Deployed hotfix v2.4.2 to ensure connections are released after each bulk operation.",
+      "resolution_time": "47 minutes"
+    },
+    {
+      "id": "INC-002",
+      "service": "Authentication API",
+      "error": "redis.exceptions.ConnectionError: Error 111 connecting to redis:6379. Connection refused.\nERROR: Session store unavailable - Redis connection failed\nWARN: Falling back to in-memory session store (not suitable for production)\n500 Internal Server Error - /api/v1/auth/login",
+      "severity": "High",
+      "environment": "Production",
+      "recent_changes": "Infrastructure team applied OS security patches to the Redis host at 02:00 UTC. Service was not restarted after patching.",
+      "root_cause": "Redis service did not restart automatically after the OS security patch was applied. The Redis process was stopped during patching and the systemd auto-restart policy was not configured.",
+      "resolution": "Manually restarted Redis service on the host. Configured systemd Restart=always and RestartSec=5 for the Redis service unit. Verified session store reconnection. Added Redis health check to deployment runbook.",
+      "resolution_time": "23 minutes"
+    },
+    {
+      "id": "INC-003",
+      "service": "Order Service",
+      "error": "P99 latency: 8400ms (SLA: 500ms)\nERROR: Query execution time exceeded 5000ms threshold\nSLOW QUERY LOG: SELECT * FROM orders JOIN order_items ON ... WHERE customer_id=? took 7823ms\nDatabase CPU: 94%\nActive queries: 312 (normal: ~20)",
+      "severity": "High",
+      "environment": "Production",
+      "recent_changes": "Marketing ran a flash sale campaign starting at 14:00 UTC, causing a 12x spike in traffic. No code changes were deployed.",
+      "root_cause": "Missing database index on orders.customer_id column. Under normal load the full table scan was fast enough, but the 12x traffic spike from the flash sale caused query times to exceed 8 seconds and saturated DB CPU.",
+      "resolution": "Added composite index on (customer_id, created_at DESC) on the orders table. Query time dropped from 7823ms to 12ms. Also added query result caching with 60s TTL for order list queries to reduce DB load during traffic spikes.",
+      "resolution_time": "1 hour 12 minutes"
+    },
+    {
+      "id": "INC-004",
+      "service": "Notification Service",
+      "error": "ERROR: Failed to publish message to queue 'notifications.email'\ncom.rabbitmq.client.AlreadyClosedException: channel is already closed due to channel error\nERROR AMQP: ACCESS_REFUSED - Login was refused using authentication mechanism PLAIN\nWARN: Message queue unavailable, 1847 notifications pending delivery",
+      "severity": "Medium",
+      "environment": "Production",
+      "recent_changes": "DevOps rotated RabbitMQ credentials as part of quarterly security rotation at 09:00 UTC. Notification Service was not updated with new credentials.",
+      "root_cause": "RabbitMQ credentials were rotated but the Notification Service environment variables were not updated. The service continued using the expired credentials, causing authentication failures on the message queue.",
+      "resolution": "Updated RABBITMQ_PASSWORD environment variable in Kubernetes secret. Rolled out new deployment. Verified queue connectivity. Replayed 1847 pending notifications from dead-letter queue. Added credentials rotation to deployment checklist.",
+      "resolution_time": "34 minutes"
+    },
+    {
+      "id": "INC-005",
+      "service": "Payment API",
+      "error": "ERROR: SSL certificate verification failed\nssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate has expired (_ssl.c:1129)\nFailed to connect to payment gateway: stripe.com\nAll payment processing halted — 0 transactions processed in last 15 minutes",
+      "severity": "Critical",
+      "environment": "Production",
+      "recent_changes": "No application changes. Certificate was due for renewal but automated renewal via Let's Encrypt failed silently 30 days ago.",
+      "root_cause": "TLS certificate for the payment gateway outbound proxy expired. The automated Let's Encrypt renewal cron job failed 30 days ago due to a DNS misconfiguration and no alert was triggered for the renewal failure.",
+      "resolution": "Manually renewed TLS certificate using certbot. Fixed DNS TXT record for ACME challenge. Restarted nginx proxy. Configured certificate expiry monitoring alert (warn at 30 days, critical at 7 days). Processed backlogged payment retry queue.",
+      "resolution_time": "28 minutes"
+    },
+    {
+      "id": "INC-006",
+      "service": "User Profile Service",
+      "error": "java.lang.OutOfMemoryError: Java heap space\nFATAL: JVM killed by OS (OOM killer)\nService unreachable: connection refused on port 8080\nHealth check failed: HTTP 000 (no response)\nKubernetes pod CrashLoopBackOff",
+      "severity": "High",
+      "environment": "Production",
+      "recent_changes": "Added user activity feed feature in v3.1.0, which loads last 500 activity events per user on profile page load.",
+      "root_cause": "Memory leak introduced by the new user activity feed feature. The activity event objects were not being garbage collected due to a static cache reference holding strong references. Under load each request added ~2MB to heap until OOM.",
+      "resolution": "Increased JVM heap from 512MB to 1GB as temporary mitigation. Fixed memory leak by replacing static HashMap cache with Caffeine cache using weak value references and 5-minute TTL. Deployed v3.1.1 hotfix. Added JVM heap utilization alert at 80%.",
+      "resolution_time": "55 minutes"
+    },
+    {
+      "id": "INC-007",
+      "service": "Search Service",
+      "error": "ElasticsearchException: None of the configured nodes are available\n[2026-09-15T11:23:41Z] ERROR: Elasticsearch cluster health: RED\nUnassigned shards: 14\nNode left the cluster: es-node-02 (reason: timeout)\nSearch API returning 503 Service Unavailable",
+      "severity": "High",
+      "environment": "Production",
+      "recent_changes": "Elasticsearch cluster was upgraded from 7.17 to 8.5 on es-node-02 and es-node-03. es-node-01 was not yet upgraded (rolling upgrade).",
+      "root_cause": "Rolling Elasticsearch upgrade caused shard rebalancing failure. es-node-02 was upgraded to 8.5 but had an incompatible snapshot repository configuration that caused it to leave the cluster after restart, making 14 shards unassigned.",
+      "resolution": "Fixed snapshot repository configuration on es-node-02. Rejoined node to cluster. Triggered manual shard reallocation. Cluster health returned to GREEN after 8 minutes. Completed rolling upgrade of remaining nodes. Added cluster health monitoring.",
+      "resolution_time": "41 minutes"
+    },
+    {
+      "id": "INC-008",
+      "service": "API Gateway",
+      "error": "WARN: Rate limit threshold exceeded for downstream services\nERROR: Circuit breaker OPEN for service: inventory-service\nHTTP 429 Too Many Requests returned to 34% of clients\nERROR: Retry storm detected — 180,000 req/min (normal: 15,000 req/min)\nDownstream service inventory-service response time: 45000ms",
+      "severity": "Critical",
+      "environment": "Production",
+      "recent_changes": "Frontend team deployed new product listing page with aggressive client-side polling (every 500ms) to show live inventory counts.",
+      "root_cause": "New frontend polling at 500ms intervals caused a 12x increase in requests to the Inventory Service. The Inventory Service slowed under load, which triggered client-side retries, creating a retry storm that further degraded the service (cascading failure).",
+      "resolution": "Deployed emergency frontend config to increase polling interval from 500ms to 30s. Added exponential backoff with jitter to client retry logic. Configured circuit breaker with 60s cooldown. Inventory Service recovered once request rate normalized. Added request rate alerting.",
+      "resolution_time": "1 hour 3 minutes"
+    }
+  ]
+}

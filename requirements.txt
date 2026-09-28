@@ -1,0 +1,15 @@
+# ============================================================
+# IncidentMind AI - Python Dependencies
+# ============================================================
+
+# Web UI framework
+streamlit==1.45.1
+
+# Hindsight persistent memory SDK
+hindsight-client==0.10.0
+
+# Groq LLM API client
+groq==0.13.1
+
+# Environment variable management
+python-dotenv==1.0.1
